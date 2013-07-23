@@ -9,18 +9,19 @@ The script works on a specified directory with any number of mkv files and does 
 (1b) Creates an index of every mkv for use with FFVideoSource().
 (1c) Extracts all attachments of every to the \Fonts subdirectory. Duplicates will be overwritten.
 (1d) Creates an AviSynth script for each mkv file from a template script, by default .\template.avs
-(2) Loads extracted fonts from the \Fonts subdirectory and makes them available to Windows application for the duration of the session or until they are manually unloaded.
+(2) Looks for typesetting inside extracted .ass subtiles and exports chapters text files, which can be imported as bookmarks in AvsPmod
+(3) Loads extracted fonts from the \Fonts subdirectory and makes them available to Windows applications for the duration of the session or until they are manually unloaded.
 --------
-(3) Unloads fonts present in the \Fonts subdirectory or whatever was specified in -fontdir
+(4) Unloads fonts present in the \Fonts subdirectory or whatever was specified in -fontdir
 
-(4a) Gets a list of installed fonts and the names (not filenames) of TrueType & OpenType fonts in the \Fonts subdirectory
-(4b) Checks which of the Fonts in \Fonts are not already installed and writes them to fonts.txt
-(5) Installs the fonts listed in fonts.txt. The fonts will NOT be copied to the Windows fonts directory but registered for immediate use from the directory they currently reside in.
-(6a) Uninstalls the fonts in fonts.txt to restore the original state
-(6b) deletes fonts.txt
+(5a) Gets a list of installed fonts and the names (not filenames) of TrueType & OpenType fonts in the \Fonts subdirectory
+(5b) Checks which of the Fonts in \Fonts are not already installed and writes them to fonts.txt
+(6) Installs the fonts listed in fonts.txt. The fonts will NOT be copied to the Windows fonts directory but registered for immediate use from the directory they currently reside in.
+(7a) Uninstalls the fonts in fonts.txt to restore the original state
+(7b) deletes fonts.txt
 
-In it's default mode, the script will do (1) and prompt you on whether or not to do (2)
-The switches -extract, -loadfonts -unloadfonts, -fontlist, -install and -uninstall will let you run (1),(2),(3),(4) separately or in any combination. No sanity checks.
+In it's default mode, the script will do (1), (2), and prompt you on whether or not to do (3)
+The switches -extract, -loadfonts, -unloadfonts, -findts -fontlist, -install and -uninstall will let you run (1),(2),(3),(4),(5) separately or in any combination. No sanity checks.
 
 
 Template variables:
@@ -52,6 +53,10 @@ Uninstalls fonts previously installed by the script.
 .\ExRelease.ps1 F:\Some\Directory -fontlist -install
 Checks the \Fonts subdirectory for already installed fonts and installs the fonts not yet available on the host system.
 
+.EXAMPLE
+.\ExRelease.ps1 . -ts "F:\Some\Directory\subtitle.ass"
+Looks for typesetting inside subtitles.ass and writes a bookmarks file to F:\Some\Directory\subtitle.TSChapters.txt
+
 .NOTES
 Requires PowerShell 3, MKVToolNix, FFMS2 and SIL FontUtils in PATH. 
 Currently only works with mkv files.
@@ -63,6 +68,8 @@ tl;dr use of the -install option is not recommended
 
 #>
 
+function ExRelease
+{
 [CmdletBinding()]
 param
 (
@@ -97,34 +104,70 @@ param
 [string]$findts
 )
 
+    $scriptVersion = 8
+    Write-Host "ExRelease r$scriptVersion ($((Get-Item $PSCommandPath).LastWriteTime.toString("yyyy-MM-dd")))`n`n" -ForegroundColor Gray 
+    If($PSVersionTable.PSVersion.Major -lt 3) {Throw "Powershell Version 3 required."}
 
-$scriptVersion = 8
-Write-Host "ExRelease r$scriptVersion ($((Get-Item $PSCommandPath).LastWriteTime.toString("yyyy-MM-dd")))`n`n" -ForegroundColor Gray 
-If($PSVersionTable.PSVersion.Major -lt 3) {Throw "Powershell Version 3 required."}
+    # some basic error checking
 
-# some basic error checking
-
-try 
-{
-    $dirContents = get-childitem $dir -ErrorAction Stop
-}
-catch
-{ 
-    Write-Host "Fatal Error: Failed processing directory $($_.Exception.ItemName): " -ForegroundColor Red -NoNewline 
-    if($_.Exception.GetType().Name -eq "ItemNotFoundException")
+    try 
     {
-        Write-Host "Directory not found" -ForegroundColor Red
+        $dirContents = get-childitem $dir -ErrorAction Stop
     }
-    else { Write-Host "`nError Message: $($_.Exception.Message)" -ForegroundColor Red } 
-    break
-}
-if (!(Test-Path $dir -pathType container))
-{
-    Write-Host "Fatal Error: $dir is not a directory. ExRelease only works on folders." -ForegroundColor Red    
-    break
-}
+    catch
+    { 
+        Write-Host "Fatal Error: Failed processing directory $($_.Exception.ItemName): " -ForegroundColor Red -NoNewline 
+        if($_.Exception.GetType().Name -eq "ItemNotFoundException")
+        {
+            Write-Host "Directory not found" -ForegroundColor Red
+        }
+        else { Write-Host "`nError Message: $($_.Exception.Message)" -ForegroundColor Red } 
+        break
+    }
+    if (!(Test-Path $dir -pathType container))
+    {
+        Write-Host "Fatal Error: $dir is not a directory. ExRelease only works on folders." -ForegroundColor Red    
+        break
+    }
 
-$fontListPath = Join-Path $dir "fonts.txt"
+    $fontListPath = Join-Path $dir "fonts.txt"
+
+
+    if(($fontlist -or $install -or $uninstall -or $fontlist -or $loadfonts -or $unloadfonts -or $findts)-eq $false)
+    {
+        $extractData = Extract -dir $dir -fontdir $fontDir 
+    
+        WriteAVS -extractData $extractData -avsTemplate $avsTemplate
+    
+        foreach ($subFile in ($extractData | ?{$_.subFile -match ".ass$"} | Select -Expand subFile))
+        {
+            WriteTSBookmarks -assName $subFile 
+        }
+
+        $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes",""
+        $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No",""
+        $choices = [System.Management.Automation.Host.ChoiceDescription[]]($yes,$no)
+        $caption = "Ready to load fonts in $($fontDir)."
+        $message = "Do you want to load fonts now?"
+        $result = $Host.UI.PromptForChoice($caption,$message,$choices,0)
+        switch($result)
+        {
+	        0 { $loadFontsStatus = LoadFonts -fontDir $fontDir }
+	        1 { Write-Host "To load extracted fonts at a later time , run this script with -l. To install extracted fonts, run this script with -f." }
+	        default { throw "bad choice" }
+        }
+    }
+    else
+    {
+        if($uninstall) { UninstallFonts -fontListPath $fontListPath }
+        if($extract) { Extract -dir $dir -fontdir $fontDir }
+        if($loadfonts) { $loadFontsStatus = LoadFonts -fontDir $fontDir }
+        if($unloadfonts) { $unLoadFontsStatus = LoadFonts -fontDir $fontDir -unload $true}
+        if($fontlist) { WriteFontList -dir $dir -fontDir $fontDir -fontListPath $fontListPath }
+        if($install) { InstallFonts -fontListPath $fontListPath }
+        if($findts) { WriteTSBookmarks -assName $findts }
+    }
+}
 
 function CheckMissingCommands([string[]]$commands)
 {
@@ -569,37 +612,4 @@ function UninstallFonts([string]$fontListPath)
     Write-Host "Done uninstalling fonts." -foreground green
 }
 
-if(($fontlist -or $install -or $uninstall -or $fontlist -or $loadfonts -or $unloadfonts -or $findts)-eq $false)
-{
-    $extractData = Extract -dir $dir -fontdir $fontDir 
-    
-    WriteAVS -extractData $extractData -avsTemplate $avsTemplate
-    
-    foreach ($subFile in ($extractData | ?{$_.subFile -match ".ass$"} | Select -Expand subFile))
-    {
-        WriteTSBookmarks -assName $subFile 
-    }
-
-    $yes = New-Object System.Management.Automation.Host.ChoiceDescription "&Yes",""
-    $no = New-Object System.Management.Automation.Host.ChoiceDescription "&No",""
-    $choices = [System.Management.Automation.Host.ChoiceDescription[]]($yes,$no)
-    $caption = "Ready to load fonts in $($fontDir)."
-    $message = "Do you want to load fonts now?"
-    $result = $Host.UI.PromptForChoice($caption,$message,$choices,0)
-    switch($result)
-    {
-	    0 { $loadFontsStatus = LoadFonts -fontDir $fontDir }
-	    1 { Write-Host "To load extracted fonts at a later time , run this script with -l. To install extracted fonts, run this script with -f." }
-	    default { throw "bad choice" }
-    }
-}
-else
-{
-    if($uninstall) { UninstallFonts -fontListPath $fontListPath }
-    if($extract) { Extract -dir $dir -fontdir $fontDir }
-    if($loadfonts) { $loadFontsStatus = LoadFonts -fontDir $fontDir }
-    if($unloadfonts) { $unLoadFontsStatus = LoadFonts -fontDir $fontDir -unload $true}
-    if($fontlist) { WriteFontList -dir $dir -fontDir $fontDir -fontListPath $fontListPath }
-    if($install) { InstallFonts -fontListPath $fontListPath }
-    if($findts) { WriteTSBookmarks -assName $findts }
-}
+Export-ModuleMember ExRelease
