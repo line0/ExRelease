@@ -252,9 +252,12 @@ function Extract([string]$dir, [string]$fontDir)
             
             $subFile = (Join-Path $file.Directory $file.BaseName) + ".$subExt"
 
-  	        # properly filters and outputs mkvextract progress without spamming the shell             # TODO: parse $mkvexEOutput for potential errors            &mkvextract tracks $file "$($mkvData.subTrackId):$subFile" `            | Tee-Object -Variable mkvexEOutput | %{$_.Split("`n")} `            | Select-String -pattern "(?:Progress: )([0-9]{1,3})(?:%)" -AllMatches `            | %{$last=-1}{if ($_.Matches.groups[1].value -ne $last -and $_.Matches.groups[1].value % 5 -eq 0)                           { Write-Host "$($_.Matches.groups[1].value)% " -ForegroundColor Gray -NoNewline;                             $last=$_.Matches.groups[1].value 
-                           }
-               }{Write-Host "Done.`n" -ForegroundColor Green }
+            if(!(Test-Path -LiteralPath $subFile -PathType Leaf))            {
+  	            # properly filters and outputs mkvextract progress without spamming the shell                 # TODO: parse $mkvexEOutput for potential errors                &mkvextract tracks $file "$($mkvData.subTrackId):$subFile" `                | Tee-Object -Variable mkvexEOutput | %{$_.Split("`n")} `                | Select-String -pattern "(?:Progress: )([0-9]{1,3})(?:%)" -AllMatches `                | %{$last=-1}{if ($_.Matches.groups[1].value -ne $last -and $_.Matches.groups[1].value % 5 -eq 0)                               { Write-Host "$($_.Matches.groups[1].value)% " -ForegroundColor Gray -NoNewline;                                 $last=$_.Matches.groups[1].value 
+                               }
+                   }{Write-Host "Done.`n" -ForegroundColor Green }
+            } else { Write-Host "$($subFile.Name) already exists, skipping." -ForegroundColor Gray }
+
         }
         else 
         { Write-Host "No subtitles found.`n" -foreground gray }
@@ -327,36 +330,16 @@ function WriteAVS([PSObject[]]$extractData, [string]$avsTemplate)
 function WriteTsBookmarks([string]$assName)
 {
     $overrideTags = @{
-        '\\blur' = 1
-        '\\fscx' = 1
-        '\\fscy' = 1
-        '\\bord' = 2
-        '\\be[0-9]' = 1
-        '\\fn' = 2
-        '\\fs(?!p[0-9]|cy[0-9]|cx[0-9])' = 2
-        '\\fsp' = 1
-        '\\frx' = 3
-        '\\fry' = 3
-        '\\frz' = 2
-        '\\fax' = 3
-        '\\fay' = 3
-        '\\[1-4]?c&H' = 2
-        '\\[1-4]?a&H' = 3
-        '\\an[1-9]' = 1
-        '\\pos' = 1
-        '\\move' = 4
-        '\\org' = 4
-        '\\fade?' = 1
-        '\\t\(.*?\)' = 4
-        '\\i?clip' = 4
-        '\\p1' = 4
-
-
+        '\\(?:fsc[xy])|(?:be[0-9])|(?:fsp)|(?:an[1-9])|(?:fade?)' = 1
+        '\\(?:blur)|(?:bord)|(?:fn)|(?:fs(?!p[0-9]|cy[0-9]|cx[0-9]))|(?:[1-4]?c&H)|(?:pos\(.*?\))' = 2
+        '\\(?:fr[xyz])|(?:fa[xy])|(?:[1-4]?a(?:lpha)?&H)' = 3
+        '\\(?:move)|(?:org)|(?:t\(?:.*?\))|(?:i?clip)|(?:p1)' = 4
+        '\\[kK][fo]?[0-9]+' = 5
     } #escaped for regex
     
     $tsScoreTresh = 5
     $timeDiffTresh = 2 # number of seconds TS lines need to be apart to be logged
-    $lineDiffTresh = 2 # number of lines between the current and last TS required for the current TS to be logged
+    $lineDiffTresh = 4 # number of lines between the current and last TS required for the current TS to be logged
 
 
     [System.IO.FileSystemInfo]$assFile = Get-Childitem -LiteralPath ([System.Management.Automation.WildcardPattern]::Unescape($assName))
@@ -378,26 +361,27 @@ function WriteTsBookmarks([string]$assName)
     
     foreach ($line in $linesSorted)
     {
-        $regex = '(.*?): [0-9]*,([0-9]+:[0-9]{2}:[0-9]{2}.[0-9]{2})(?:,.*?){8}(.*)'
+        $regex = '(Dialogue): [0-9]*,([0-9]+:[0-9]{2}:[0-9]{2}.[0-9]{2})(?:,.*?){7}(.*?),(.*)'
         $lineMatches = select-string -InputObject $line -pattern $regex  | select -expand Matches
         if($lineMatches)
         {
             $lineType =  $lineMatches.groups[1].value
-            $lineStartTime = ([DateTime]$lineMatches.groups[2].value).AddMilliseconds(100)
+            $lineStartTime = ([DateTime]$lineMatches.groups[2].value)
             $timeDiff = New-TimeSpan -Start $lineStartTimeLastTS -End $lineStartTime
-            $lineText = $lineMatches.groups[3].value
-              
+            $lineText = $lineMatches.groups[4].value
+            $lineEffect = $lineMatches.groups[3].value
 
             $overrideTags.GetEnumerator() | ForEach-Object {[int]$tsScore = 0} {
             $matches = select-string -InputObject $lineText -pattern $_.Key -AllMatches
             $tsScore = $tsScore + ([int]$matches.Matches.Count * [int]$_.Value)
             }
 
-            if ($tsScore -ge $tsScoreTresh -and $lineType -eq "Dialogue")
-            {
+            if ($tsScore -ge $tsScoreTresh -or $lineEffect)
+            {  
                 if($timeDiff -ge $timeDiffTresh -and ($lineNum - $lineNumLastTS) -ge $lineDiffTresh)
-                {     
-                    $bookmarks += "$lineNum=$($lineStartTime.toString("HH:mm:ss.fff"))"
+                {   
+                    Write-Host "Found typesetting at line $lineNum ($($lineStartTime.toString("HH:mm:ss")))" -ForegroundColor Gray  
+                    $bookmarks += "$lineNum=$($lineStartTime.AddMilliseconds(100).toString("HH:mm:ss.fff"))"
                     $lineStartTimeLastTS = $lineStartTime
                 }
                 $lineNumLastTS = $lineNum
