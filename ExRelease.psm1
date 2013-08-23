@@ -5,23 +5,23 @@ ExRelease helps preparing softsubbed fansub releases for comparison. Extracts su
  
 .DESCRIPTION
 The script works on a specified directory with any number of mkv files and does the following operations:
-(1a) Looks for first subtitle stream in every mkv and extracts it to filename.[ass|srt|xxx].
-(1b) Creates an index of every mkv for use with FFVideoSource().
-(1c) Extracts all attachments of every to the \Fonts subdirectory. Duplicates will be overwritten.
-(1d) Creates an AviSynth script for each mkv file from a template script, by default .\template.avs
-(2) Looks for typesetting inside extracted .ass subtiles and exports chapters text files, which can be imported as bookmarks in AvsPmod
-(3) Loads extracted fonts from the \Fonts subdirectory and makes them available to Windows applications for the duration of the session or until they are manually unloaded.
+(1) Creates an index of every mkv for use with FFVideoSource().
+(2a) Looks for subtitle streams in every mkv and extracts it to filename.trackNum.[ass|srt|xxx].
+(2b) Extracts all attachments of every to the \Fonts subdirectory. Duplicates will be overwritten.
+(2c) Creates an AviSynth script for each mkv file from a template script, by default .\template.avs
+(3) Looks for typesetting inside extracted .ass subtiles and exports chapters text files, which can be imported as bookmarks in AvsPmod
+(4) Loads extracted fonts from the \Fonts subdirectory and makes them available to Windows applications for the duration of the session or until they are manually unloaded.
 --------
-(4) Unloads fonts present in the \Fonts subdirectory or whatever was specified in -fontdir
+(5) Unloads fonts present in the \Fonts subdirectory or whatever was specified in -fontdir
 
-(5a) Gets a list of installed fonts and the names (not filenames) of TrueType & OpenType fonts in the \Fonts subdirectory
-(5b) Checks which of the Fonts in \Fonts are not already installed and writes them to fonts.txt
-(6) Installs the fonts listed in fonts.txt. The fonts will NOT be copied to the Windows fonts directory but registered for immediate use from the directory they currently reside in.
-(7a) Uninstalls the fonts in fonts.txt to restore the original state
-(7b) deletes fonts.txt
+(6a) Gets a list of installed fonts and the names (not filenames) of TrueType & OpenType fonts in the \Fonts subdirectory
+(6b) Checks which of the Fonts in \Fonts are not already installed and writes them to fonts.txt
+(7) Installs the fonts listed in fonts.txt. The fonts will NOT be copied to the Windows fonts directory but registered for immediate use from the directory they currently reside in.
+(8a) Uninstalls the fonts in fonts.txt to restore the original state
+(8b) deletes fonts.txt
 
 In it's default mode, the script will do (1), (2), and prompt you on whether or not to do (3)
-The switches -extract, -loadfonts, -unloadfonts, -findts -fontlist, -install and -uninstall will let you run (1),(2),(3),(4),(5) separately or in any combination. No sanity checks.
+The switches -index, -extract, -findts, -loadfonts, -unloadfonts, -fontlist, -install and -uninstall will let you run (1)-(8) separately or in any combination. No sanity checks.
 
 
 Template variables:
@@ -67,6 +67,7 @@ Currently the script can only check for installed font families but not for diff
 tl;dr use of the -install option is not recommended
 
 #>
+#requires -version 3
 
 function ExRelease
 {
@@ -101,18 +102,23 @@ param
 [switch]$uninstall = $false,
 [Parameter(Mandatory=$false, HelpMessage='Looks for typesetting inside supplied .ass subtitle and writes a timecode list to a .txt with the same base name')]
 [alias("ts")]
-[string]$findts
+[string]$findts,
+[Parameter(Mandatory=$false, HelpMessage='Creates FFMS2 indexes for all files.')]
+[string]$index,
+[Parameter(Mandatory=$false, HelpMessage='Returns script version Number')]
+[switch]$version
 )
 
-    $scriptVersion = 8
+    $scriptVersion = [version]"0.9.5"
     Write-Host "ExRelease r$scriptVersion ($((Get-Item $PSCommandPath).LastWriteTime.toString("yyyy-MM-dd")))`n`n" -ForegroundColor Gray 
     If($PSVersionTable.PSVersion.Major -lt 3) {Throw "Powershell Version 3 required."}
 
-    # some basic error checking
+    if(!($dir -match '`')) { $dir = [System.Management.Automation.WildcardPattern]::Escape($dir) }
 
-    try 
+    # some basic error checking
+    try
     {
-        $dirContents = get-childitem $dir -ErrorAction Stop
+        $dirContents = get-childitem -LiteralPath ([System.Management.Automation.WildcardPattern]::Unescape($dir)) -ErrorAction Stop
     }
     catch
     { 
@@ -133,13 +139,14 @@ param
     $fontListPath = Join-Path $dir "fonts.txt"
 
 
-    if(($fontlist -or $install -or $uninstall -or $fontlist -or $loadfonts -or $unloadfonts -or $findts)-eq $false)
+    if(($fontlist -or $install -or $uninstall -or $fontlist -or $loadfonts -or $unloadfonts -or $findts -or $version -or $index -or $extract)-eq $false)
     {
-        $extractData = Extract -dir $dir -fontdir $fontDir 
-    
+        $extractData = Extract -dir $dir -fontdir $fontDir
+        Index -dir $dir 
+
         WriteAVS -extractData $extractData -avsTemplate $avsTemplate
     
-        foreach ($subFile in ($extractData | ?{$_.subFile -match ".ass$"} | Select -Expand subFile))
+        foreach ($subFile in ($extractData | %{ $_.subFiles} | ?{$_ -match ".ass$"}))
         {
             WriteTSBookmarks -assName $subFile 
         }
@@ -159,8 +166,10 @@ param
     }
     else
     {
+        if($version) { return $scriptVersion; break }
         if($uninstall) { UninstallFonts -fontListPath $fontListPath }
-        if($extract) { Extract -dir $dir -fontdir $fontDir }
+        if($index) { Index -dir $dir }
+        if($extract) { $extractData = Extract -dir $dir -fontdir $fontDir }
         if($loadfonts) { $loadFontsStatus = LoadFonts -fontDir $fontDir }
         if($unloadfonts) { $unLoadFontsStatus = LoadFonts -fontDir $fontDir -unload $true}
         if($fontlist) { WriteFontList -dir $dir -fontDir $fontDir -fontListPath $fontListPath }
@@ -178,7 +187,7 @@ function CheckMissingCommands([string[]]$commands)
                 'dumpfont.exe' = 'SIL FontUtils'
                 'addfont.exe' = 'SIL FontUtils'
                 }
-    
+
     $commandDetails.GetEnumerator() | ForEach-Object {$cmdNotFound = $false} {
         if (($commands -contains $_.Key) -and !(Get-Command $_.Key -ErrorAction SilentlyContinue))
         {
@@ -189,74 +198,219 @@ function CheckMissingCommands([string[]]$commands)
     if($cmdNotFound) { break }
 }
 
-function GetMkvData([string]$file)
+function OptAdd([object]$obj,$props)
 {
-    $mkvData = &mkvinfo  --ui-language en $file
-
-    $regex = '(?:.*?\+ A track[\s\n\|]+\+ Track number: [0-9]+ \(track ID for mkvmerge & mkvextract: )([0-9]+)(?:\)[\s\n\|]+\+ Track UID: [0-9]+[\s\n\|]+\+ Track type: video[\s\n\|]+.*?\+ Video track[\s\n\|]+'`
-           + '\+ Pixel width: (?<pwidth>[0-9]+)[\s\n\|]+\+ Pixel height: (?<pheight>[0-9]+)[\s\n\|]+(?:\+ Interlaced: (?<interlaced>[0-9])[\s\n\|]+)?\+ Display width: (?<dwidth>[0-9]+)[\s\n\|]+\+ Display height: (?<dheight>[0-9]+)[\s\n\|]+)'`
-           + '(?:.*?\+ A track[\s\n\|]+\+ Track number: [0-9]+ \(track ID for mkvmerge & mkvextract: (?<subtracknum>[0-9]+)\)[\s\n\|]+\+ Track UID: [0-9]+[\s\n\|]+\+ Track type: subtitles[\s\n\|]+.*?\+ Codec ID: (?<subtype>.*?))?'`
-           + '(?:(?:[\s\n\|]+.*?Attachments)(?:[\s\n\|]+\+ Attached[\s\n\|]+\+ File name: (?<attachment>.*?)[\s\n]+\|.*?\+ File UID: [0-9]+)+(?:[\s\n\|]+)|[\s\n\|]+)'
-
-    $matches = select-string -InputObject [string]$mkvData  -pattern $regex  | select -expand Matches
-	
-    $subType = $matches.groups["subtype"].value
-	$subTrackId = $matches.groups["subtracknum"].value
-	$attachments = $matches.groups["attachment"].captures
-    $dResX = [int]($matches.groups["dwidth"].value)
-    $dResY = [int]($matches.groups["dheight"].value)
-
-    $mkvData = New-Object PsObject 
-    if ($subType) { Add-Member -InputObject $mkvData -Name subType -Value $subType -MemberType NoteProperty }
-    if ($subTrackId) { Add-Member -InputObject $mkvData -Name subTrackId -Value $subTrackId -MemberType NoteProperty }
-    if ($attachments) { Add-Member -InputObject $mkvData -Name attachments -Value $attachments -MemberType NoteProperty }
-    if ($dResX) { Add-Member -InputObject $mkvData -Name dResX -Value $dResX -MemberType NoteProperty }
-    if ($dResY) { Add-Member -InputObject $mkvData -Name dResY -Value $dResY -MemberType NoteProperty }
-
-    return $mkvData
+    $props | ?{ $_.Val }| %{ 
+        $val = if(!$_.Type) {$_.Val} else {$_.Val -as $_.Type}    
+        Add-Member -InputObject $obj -Name $_.Prop -Value $val -MemberType NoteProperty             
+    }
+    return $obj
 }
 
-function Extract([string]$dir, [string]$fontDir)
+function Get-MkvInfo([string]$file)
 {
-    CheckMissingCommands -commands "ffmsindex.exe", "mkvinfo.exe"
+    $mkvInfo = (&mkvinfo  --ui-language en $file) | ? {$_.trim() -ne "" }
+
+    $i=0
+    $mkvInfoFilt = @()
+    foreach ($line in $mkvInfo)
+    {
+        $regex = '^([| ]*)\+ (.*?)(?:(?:\: (.*?))|(?:, size [0-9]*))?(?:$)'
+        $matches = select-string -InputObject $line -pattern $regex  | Select -ExpandProperty Matches
+
+        [int]$depth = $matches.Groups[1].Length #get tree depth from indentation
+        $prop = $matches.Groups[2].Value
+        $val = $matches.Groups[3].Value
+
+        $mkvInfoFilt += ,@($i, $depth, $prop, $val)
+        $i++
+    }
+
+    $maxDepth = $mkvInfoFilt | %{$_[1]} | Measure-Object -Maximum
+    [array]::reverse($mkvInfoFilt)
+
+    for([int]$i=$maxDepth.Maximum; $i -ge 0; $i--)
+    {
+        $lines = @($mkvInfoFilt | ?{$_[1] -eq $i}) + ,@(-1,-1,-1) # additional dummy line required to parse last line
+
+        Remove-Variable lastLine -ErrorAction SilentlyContinue
+        foreach($line in $lines)
+        {
+            if(!$lastLine) { $arr = @() }
+
+            elseif(($lastLine[0]-1) -ne $line[0]) #non-consecutive line indexes mean we've found our parent node
+            {
+                $idx = [array]::IndexOf(($mkvInfoFilt | %{$_[0]}),$lastLine[0]-1)
+                [array]::reverse($arr)
+                $mkvInfoFilt[$idx][3] = $arr
+                $arr = @()
+            }
+
+            if($line[0] -ne -1) #skip dummy entries
+            {
+                if (!$arr.($line[2])) #if a sibling node with the same name doesn't exist...
+                { 
+                    $hash = @{$line[2] = ,@($line[3])} # create new hashtable and add array with value of the current line as first element
+                    $arr += $hash
+
+                }
+                else
+                {
+                    $arr[-1].Set_Item($line[2],(,@($line[3]))+$arr[-1].($line[2])) # else add value as new array item to the existing hashtable
+                }
+                $lastLine = $line
+            }
+
+        }
+        $mkvInfoFilt = $mkvInfoFilt | ?{$_[1] -eq 0 -or $_[1] -ne $i}    # remove processed lines except the parent nodes 
+        0..($mkvInfoFilt.Length-1) |%{$mkvInfoFilt[$_][0]=$mkvInfoFilt.Length-1-$_} # make line indexes continuous again
+    }
+
+    $segments = $mkvInfoFilt | ?{ $_[2] -eq "Segment"} | %{$_[3]}
+    $tracks = $segments.("Segment tracks")[0]["A track"]
+
+    $segmentInfo = [PSCustomObject]@{
+        UID = [byte[]]$(,@($segments.("Segment information").("Segment UID")[0] -split "\s" | %{[byte]$_}))
+        Duration = [TimeSpan]($segments.("Segment information").("Duration")[0] -creplace ".*?s \(([0-9]*:[0-9]{2}:[0-9]{2}.[0-9]{3})\)","`$1")
+        TrackCount = $tracks.Length
+        }
+
+    if($segments.("Segment information").("Title")) 
+        { Add-Member -InputObject $segmentInfo -Name Title -Value $segments.("Segment information").("Title")[0] -MemberType NoteProperty }
+
+
+    $tracksInfo = @()
+    foreach ($track in $tracks)
+    {
+        $trackId = [int]($track.("Track number")[0] -creplace "[0-9]+ \(track ID for mkvmerge \& mkvextract\: ([0-9]*)\)","`$1")
+        $trackType = $track.("Track type")[0]
+
+        $trackInfo = [PSCustomObject]@{
+            ID = $trackId
+            Type = $trackType
+            Codec = $track.("Codec ID")[0]
+        }
+
+        $trackInfo = OptAdd -obj $trackInfo -props @(@{Prop="Name"; Val=$track.("Name")},
+                                                     @{Prop="Lang"; Val=$track.("Language")}
+                                                     @{Prop="Enabled"; Val=$track.("Enabled"); Type=[type]"bool"})
+
+        if($trackType -eq "video")
+        {
+            $trackInfoVideo = @{
+                Framerate = [float]($track.("Default duration")[0] -creplace "[0-9]*.[0-9]*ms \(([0-9]*.[0-9]*) frames.*?\)","`$1")
+                dResX = [int]$track.("Video track").("Display width")[0]
+                dResY = [int]$track.("Video track").("Display height")[0]
+                pResX = [int]$track.("Video track").("Pixel width")[0]
+                pResY = [int]$track.("Video track").("Pixel height")[0]
+            }
+            $trackInfoVideo = OptAdd -obj $trackInfoVideo -props @(@{Prop="Interlaced"; Val=$track.("Video track").("Interlaced"); Type=[type]"bool"})
+            Add-Member -InputObject $trackInfo -NotePropertyMembers $trackInfoVideo
+        }
+
+        if($trackType -eq "audio")
+        {
+            $trackInfoAudio = @{
+                SampleRate = [int]$track.("Audio track").("Sampling Frequency")[0]
+                ChannelCount = [int]$track.("Audio track").("Channels")[0]
+            }
+            $trackInfoAudio = OptAdd -obj $trackInfoAudio -props @(@{Prop="BitDepth"; Val=$track.("Audio track").("Bit Depth"); Type=[type]"int"})
+            Add-Member -InputObject $trackInfo -NotePropertyMembers $trackInfoAudio
+        }
+
+        $tracksInfo += $trackInfo
+    }
+    $segmentInfo = $segmentInfo | Add-Member -MemberType NoteProperty -Name Tracks -Value $tracksInfo -PassThru
+
+    
+    if($segments.("Attachments")) 
+    { 
+        $attsInfo = @()
+        #$atts = $segments.("Attachments").("Attached")
+        $atts = $segments.("Attachments")[0]["Attached"] # because the above line apparently resolves array too far when there's only one element
+   
+        foreach ($att in $atts)
+        {
+            $attInfo = [PSCustomObject]@{
+                UID = [uint64]$att.("File UID")[0]
+                MimeType = $att.("Mime type")[0]
+                Name = $att.("File Name")[0]
+                }
+            $attsInfo += $attInfo
+        }
+        $segmentInfo = $segmentInfo | Add-Member -MemberType NoteProperty -Name Attachments -Value $attsInfo -PassThru
+    }
+
+
+    $segmentInfo = $segmentInfo | Add-Member -MemberType ScriptMethod -Value `
+    { param([Parameter(Mandatory=$true)][string]$type) 
+        return $this.Tracks | ?{ $_.Type -eq $type }
+    } -Name GetTracksByType -PassThru
+
+    $segmentInfo = $segmentInfo | Add-Member -MemberType ScriptMethod -Value `
+    { param([Parameter(Mandatory=$true)][int]$id) 
+        return $this.Tracks | ?{ $_.ID -eq $id }
+    } -Name GetTrackById -PassThru
+
+    return $segmentInfo
+}
+function Index([string]$dir)
+{
+    CheckMissingCommands -commands "ffmsindex.exe"
 
     $mkvFiles= Join-Path $dir "*" | get-childitem -include ('*.mkv')
-
-    [PSObject[]]$extractData = @()
-
     foreach($file in $mkvFiles)
     {
 	    Write-Host "Indexing $($file.Name) ..." -foreground yellow
 	    &ffmsindex $file `        | Tee-Object -Variable ffmsOutput | %{$_.Split("`n")} `        | Select-String -pattern "(?:Indexing, please wait... )([0-9]{1,3})(?:%)" -AllMatches `        | %{$last=-1}{if ($_.Matches.groups[1].value -ne $last -and $_.Matches.groups[1].value % 5 -eq 0) `                        { Write-Host "$($_.Matches.groups[1].value)% " -ForegroundColor Gray -NoNewline;                            $last=$_.Matches.groups[1].value 
                         } 
-           }
+                     }
         
         # TODO: add more error checking
         if ($ffmsOutput -match "index file already exists")
              { Write-Host "Index file already exists.`n" -ForegroundColor Gray }
         else { Write-Host "Done.`n" -ForegroundColor Green } 
-             
-	    $mkvData = GetMkvData -file $file
-        Write-Host "Display Resolution: $($mkvData.dResX)x$($mkvData.dResY)`n"     
+    }
+}
 
+function Extract([string]$dir, [string]$fontDir)
+{
+    CheckMissingCommands -commands "mkvinfo.exe"
+
+    $mkvFiles= Join-Path $dir "*" | get-childitem -include ('*.mkv')
+    [PSObject[]]$extractData = @()
+
+    foreach($file in $mkvFiles)
+    {
+        $mkvInfo = Get-MkvInfo -file $file
+        $vInfo = $mkvInfo.GetTracksByType("video")[0]
+        $subs = $mkvInfo.GetTracksByType("subtitles")
+       
+        Write-Host "$($file.Name)$(if($mkvInfo.Title){": " + $mkvInfo.Title}) ($($mkvInfo.TrackCount) tracks)"
+        Write-Host "Display Resolution: $($vInfo.dResX)x$($vInfo.dResY)`n"     
         Write-Host "Extracting subtitles..." -foreground yellow
-        if ($mkvData.subTrackId)
+        if ($subs)
         {
-            $subExt=switch($mkvData.subType)
-	        {
-		        "S_TEXT/ASS" { "ass" }
-		        "S_TEXT/UTF8" { "srt" }
-                "S_VOBSUB" { "sub" }
-		        default { "unknown" }
-	        }
-            
-            $subFile = (Join-Path $file.Directory $file.BaseName) + ".$subExt"
+            $subFiles = @()
+            foreach ($sub in $subs) 
+            {
+                $subExt=switch($sub.Codec)
+	            {
+		            "S_TEXT/ASS" { "ass" }
+		            "S_TEXT/UTF8" { "srt" }
+                    "S_VOBSUB" { "sub" }
+		            default { "unknown" }
+	            }
+                Write-Host "#$($sub.ID): $(if($sub.Name) {$sub.Name} else {("unnamed")}) ($subExt)" -ForegroundColor Gray
 
-            if(!(Test-Path -LiteralPath $subFile -PathType Leaf))            {
-  	            # properly filters and outputs mkvextract progress without spamming the shell                 # TODO: parse $mkvexEOutput for potential errors                &mkvextract tracks $file "$($mkvData.subTrackId):$subFile" `                | Tee-Object -Variable mkvexEOutput | %{$_.Split("`n")} `                | Select-String -pattern "(?:Progress: )([0-9]{1,3})(?:%)" -AllMatches `                | %{$last=-1}{if ($_.Matches.groups[1].value -ne $last -and $_.Matches.groups[1].value % 5 -eq 0)                               { Write-Host "$($_.Matches.groups[1].value)% " -ForegroundColor Gray -NoNewline;                                 $last=$_.Matches.groups[1].value 
-                               }
-                   }{Write-Host "Done.`n" -ForegroundColor Green }
-            } else { Write-Host "$($subFile.Name) already exists, skipping." -ForegroundColor Gray }
+                $subFiles += ((Join-Path $file.Directory $file.BaseName) + ".$($sub.ID).$subExt")
+
+                if(!(Test-Path -LiteralPath $subFiles[-1] -PathType Leaf))                {
+  	                # properly filters and outputs mkvextract progress without spamming the shell                     # TODO: parse $mkvexEOutput for potential errors                    &mkvextract tracks $file "$($sub.ID):$($subFiles[-1])" `                    | Tee-Object -Variable mkvexEOutput | %{$_.Split("`n")} `                    | Select-String -pattern "(?:Progress: )([0-9]{1,3})(?:%)" -AllMatches `                    | %{$last=-1}{if ($_.Matches.groups[1].value -ne $last -and $_.Matches.groups[1].value % 5 -eq 0)                                   { Write-Host "$($_.Matches.groups[1].value)% " -ForegroundColor Gray -NoNewline;                                     $last=$_.Matches.groups[1].value 
+                                   }
+                       }{Write-Host "Done.`n" -ForegroundColor Green }
+                } else { Write-Host "$($subFiles[-1]) already exists, skipping." -ForegroundColor Gray }
+            }
 
         }
         else 
@@ -265,14 +419,15 @@ function Extract([string]$dir, [string]$fontDir)
         
         Write-Host "Extracting fonts..." -foreground yellow
 
-	    if($mkvData.attachments.count -gt 0)
+        $atts = $mkvInfo.Attachments
+	    if($atts.count -gt 0)
         {
             [string[]] $attachmentArgs=@()
 	        $i=1
-	        foreach($attachment in $mkvData.attachments)
+	        foreach($att in $atts)
 	        {
                 $fontDirUnescaped = [System.Management.Automation.WildcardPattern]::Unescape($fontDir)
-		        $attachmentArgs += "$($i):" + (Join-Path $fontDirUnescaped $attachment.value)
+		        $attachmentArgs += "$($i):" + (Join-Path $fontDirUnescaped $att.Name)
 		        $i++
 	        }
 	
@@ -280,9 +435,9 @@ function Extract([string]$dir, [string]$fontDir)
         }
         else { Write-Host "No fonts attached to $($file.Name).`n" -ForegroundColor Gray }
 
-        $extractData += (New-Object PsObject -Property @{videoFile=$file; dResX=$mkvData.dResX; dResY=$mkvData.dResY} | ? { (!$subFile) -or (Add-Member -InputObject $_ -MemberType NoteProperty -Name subFile -Value $subFile -PassThru) })
+        $extractData += (New-Object PsObject -Property @{videoFile=$file; dResX=$vInfo.dResX; dResY=$vInfo.dResY} | ? { (!$subFiles) -or (Add-Member -InputObject $_ -MemberType NoteProperty -Name subFiles -Value $subFiles -PassThru) })
         Remove-Variable subFile -ErrorAction SilentlyContinue
-        
+
     }
     return $extractData
 }
@@ -306,7 +461,7 @@ function WriteAVS([PSObject[]]$extractData, [string]$avsTemplate)
             # Replace template variables using lookup table
             $templateVars = @{
                 '{{\?VIDEO_FILE}}' = [string]$release.videoFile.FullName
-                '{{\?SUBTITLE_FILE}}' = if($release.subFile) { [string]$release.subFile } else { "" }
+                '{{\?SUBTITLE_FILE}}' = if($release.subFiles) { [string]$release.subFiles[0] } else { "" }
                 '{{\?GROUP_NAME}}' = [string]$releaseInfo.groups["group"].value 
                 '{{\?TARGET_RES_X}}' = if($targetResX -gt 0){[string]$targetResX} else {"w"}
                 '{{\?TARGET_RES_Y}}' = if($targetResY -gt 0){[string]$targetResY} else {"h"}
